@@ -1,8 +1,7 @@
 // tree.c — Tree object serialization and construction
 //
 // PROVIDED functions: get_file_mode, tree_parse, tree_serialize
-// NOTE: tree_from_index is implemented in index.c because it depends on index_load,
-//       allowing test_tree to link without index.o.
+// TODO functions:     tree_from_index
 //
 // Binary tree format (per entry, concatenated with no separators):
 //   "<mode-as-ascii-octal> <name>\0<32-byte-binary-hash>"
@@ -14,15 +13,21 @@
 #include <dirent.h>
 #include <sys/stat.h>
 
-#define MODE_FILE  0100644
-#define MODE_EXEC  0100755
-#define MODE_DIR   0040000
+// Forward declarations
+int object_write(ObjectType type, const void *data, size_t len, ObjectID *id_out);
+
+// ─── Mode Constants ─────────────────────────────────────────────────────────
+
+#define MODE_FILE      0100644
+#define MODE_EXEC      0100755
+#define MODE_DIR       0040000
 
 // ─── PROVIDED ───────────────────────────────────────────────────────────────
 
 uint32_t get_file_mode(const char *path) {
     struct stat st;
     if (lstat(path, &st) != 0) return 0;
+
     if (S_ISDIR(st.st_mode))  return MODE_DIR;
     if (st.st_mode & S_IXUSR) return MODE_EXEC;
     return MODE_FILE;
@@ -47,7 +52,7 @@ int tree_parse(const void *data, size_t len, Tree *tree_out) {
         ptr = space + 1;
 
         const uint8_t *null_byte = memchr(ptr, '\0', end - ptr);
-        if (!null_byte) return -1;
+        if (!null_byte) return -1; // Malformed data
 
         size_t name_len = null_byte - ptr;
         if (name_len >= sizeof(entry->name)) return -1;
@@ -80,7 +85,9 @@ int tree_serialize(const Tree *tree, void **data_out, size_t *len_out) {
     for (int i = 0; i < sorted_tree.count; i++) {
         const TreeEntry *entry = &sorted_tree.entries[i];
         int written = sprintf((char *)buffer + offset, "%o %s", entry->mode, entry->name);
-        offset += written + 1; // +1 to include the null terminator written by sprintf
+        offset += written + 1; // +1 to step over the null terminator written by sprintf
+        
+        // Write binary hash
         memcpy(buffer + offset, entry->hash.hash, HASH_SIZE);
         offset += HASH_SIZE;
     }
@@ -90,8 +97,24 @@ int tree_serialize(const Tree *tree, void **data_out, size_t *len_out) {
     return 0;
 }
 
-// NOTE: tree_from_index is implemented in index.c
-// It is declared in tree.h and called from commit.c.
-// The definition lives in index.c because it depends on index_load(),
-// which would cause linking failures in the test_tree binary (which only
-// links tree.o + object.o, not index.o).
+// ─── TODO: Implement these ──────────────────────────────────────────────────
+
+// Build a tree hierarchy from the current index and write all tree
+// objects to the object store.
+//
+// HINTS - Useful functions and concepts for this phase:
+//   - index_load      : load the staged files into memory
+//   - strchr          : find the first '/' in a path to separate directories from files
+//   - strncmp         : compare prefixes to group files belonging to the same subdirectory
+//   - Recursion       : you will likely want to create a recursive helper function 
+//                       (e.g., `write_tree_level(entries, count, depth)`) to handle nested dirs.
+//   - tree_serialize  : convert your populated Tree struct into a binary buffer
+//   - object_write    : save that binary buffer to the store as OBJ_TREE
+//
+// Returns 0 on success, -1 on error.
+int tree_from_index(ObjectID *id_out) {
+    // TODO: Implement recursive tree building
+    // (See Lab Appendix for logical steps)
+    (void)id_out;
+    return -1;
+}
