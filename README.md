@@ -600,3 +600,101 @@ The following questions cover filesystem concepts beyond the implementation scop
 - **Git Internals** (Pro Git book): https://git-scm.com/book/en/v2/Git-Internals-Plumbing-and-Porcelain
 - **Git from the inside out**: https://codewords.recurse.com/issues/two/git-from-the-inside-out
 - **The Git Parable**: https://tom.preston-werner.com/2009/05/19/the-git-parable.html
+
+---
+
+## Lab Report
+
+### Phase 1 — Object Storage
+
+**Screenshot 1A — All Phase 1 tests passing:**
+![Phase 1 tests](screenshots/1A.png)
+
+**Screenshot 1B — Sharded object directory structure:**
+![Object store structure](screenshots/1B.png)
+
+### Phase 2 — Tree Objects
+
+**Screenshot 2A — All Phase 2 tests passing:**
+![Phase 2 tests](screenshots/2A.png)
+
+**Screenshot 2B — Raw binary tree object (xxd):**
+![Tree binary format](screenshots/2B.png)
+
+### Phase 3 — Staging Area
+
+**Screenshot 3A — init → add → status sequence:**
+![Status output](screenshots/3A.png)
+
+**Screenshot 3B — Raw index file contents:**
+![Index file](screenshots/3B.png)
+
+### Phase 4 — Commits and History
+
+**Screenshot 4A — pes log with three commits:**
+![Commit log](screenshots/4A.png)
+
+**Screenshot 4B — Object store growth after three commits:**
+![Object store](screenshots/4B.png)
+
+**Screenshot 4C — HEAD and branch reference chain:**
+![Reference chain](screenshots/4C.png)
+
+**Final — Full integration test passing:**
+![Integration test](screenshots/Final1.png)
+![Integration test](screenshots/Final2.png)
+
+---
+
+## Analysis Questions
+
+### Q5.1 — How would you implement `pes checkout <branch>`?
+
+To switch branches, three things must happen in `.pes/`:
+
+1. **Read the target branch's commit hash** from `.pes/refs/heads/<branch>`, then walk its tree to get the full file list and their blob hashes.
+2. **Update the working directory** — for every file in the target tree, read the blob from `.pes/objects/` and write it to disk. Files not present in the target tree must be deleted.
+3. **Update HEAD** — write `ref: refs/heads/<branch>` into `.pes/HEAD`.
+
+What makes this complex: the working directory update is not atomic. If a power failure occurs mid-way, the working directory is in an inconsistent mixed state. Git handles this with a lock file (`.git/index.lock`) and by updating the index and working tree incrementally, rolling back on failure. Additionally, creating directories for nested paths (e.g., `src/main.c` requires `src/` to exist first) must be done in the right order.
+
+### Q5.2 — How would you detect a "dirty working directory" conflict during checkout?
+
+For each file in the current index:
+1. Re-stat the file on disk and compare `mtime` and `size` to the index entry (fast path).
+2. If metadata differs, re-hash the file and compare the SHA-256 to the stored blob hash (slow path for certainty).
+3. If the hash differs, the file is locally modified.
+
+Then compare the current index hash for that file against what the target branch's tree has for the same path. If the file is both locally modified AND differs between branches, checkout must refuse and print an error (just like Git's "Your local changes to the following files would be overwritten by checkout").
+
+Files that are locally modified but identical between the two branches can be safely ignored — the user's local edit survives the switch.
+
+### Q5.3 — What happens in detached HEAD, and how do you recover?
+
+In detached HEAD, `.pes/HEAD` contains a raw commit hash instead of `ref: refs/heads/main`. Any new commits advance HEAD directly (rewriting the hash in HEAD) but no branch pointer moves, so those commits are reachable only from HEAD. If you then switch branches or reinitialize, HEAD gets overwritten and those commits become unreferenced — not deleted immediately, but invisible to `pes log` and eventually collected by garbage collection.
+
+Recovery: if you still have the hash (from terminal history or a note), run `pes checkout -b recovery-branch <hash>` (create a new branch pointing at that commit). In our PES-VCS without that command, you would manually write the hash into `.pes/refs/heads/recovery` and update HEAD to point to it.
+
+### Q6.1 — Algorithm to find and delete unreachable objects
+
+This is a mark-and-sweep:
+
+1. **Mark phase** — collect all reachable hashes. Start from every branch in `.pes/refs/heads/`. For each branch, walk the commit chain following `parent` pointers. For each commit, add its tree hash to the reachable set, then recursively add every blob and subtree that tree points to. Use a `HashSet` (hash table or sorted array of 32-byte hashes) to track visited objects and avoid re-visiting.
+2. **Sweep phase** — walk every file in `.pes/objects/XX/YYY...`. If its hash (reconstructed from the path) is not in the reachable set, delete it.
+
+For 100,000 commits and 50 branches: assuming an average of 100 files per commit, you visit roughly 100,000 commits × 1 tree + 100,000 × 100 blobs = ~10 million object hash lookups. With a hash set, each lookup is O(1), so the total is linear in the number of objects — easily feasible.
+
+### Q6.2 — Race condition between GC and a concurrent commit
+
+The race:
+
+1. Thread A (committing) calls `object_write` for a new blob `B`. The blob is written to disk but the commit object referencing it has not been written yet — so no branch points to `B`.
+2. Thread B (GC) runs the mark phase. It traverses all branches, finds `B` unreachable (because the commit isn't written yet), and marks it for deletion.
+3. Thread A writes the commit object referencing `B`, then updates the branch ref.
+4. Thread B deletes `B` from the object store.
+
+Now the committed history references a deleted blob — the repository is corrupt.
+
+Git avoids this with a "grace period" approach: GC only deletes objects older than 2 weeks by default (`gc.pruneExpire`). Any object written within that window is considered potentially in-flight and is left alone. A new commit takes milliseconds, so a 2-week grace period makes the race effectively impossible in practice. Additionally, Git uses `.git/gc.pid` lock files to prevent two GC processes from running simultaneously.
+
+---
